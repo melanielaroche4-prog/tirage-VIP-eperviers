@@ -135,14 +135,100 @@ button{font-weight:700;cursor:pointer}
 
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 
 const SUPABASE_URL = 'https://xloxfhanoygbgnrytyxh.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_gsP4NDTVR1vhiTMW4lZjHA_KGNVOrwk';
-const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true }
-});
+
+const SESSION_KEY = "tirage_vip_supabase_session";
+let authSession = null;
+let refreshTimer = null;
+
+function readStoredSession(){
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch(e) { return null; }
+}
+
+function storeSession(session){
+  authSession = session || null;
+  if(session) localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  else localStorage.removeItem(SESSION_KEY);
+}
+
+async function apiFetch(path, options = {}, retry = true){
+  const headers = new Headers(options.headers || {});
+  headers.set("apikey", SUPABASE_KEY);
+  if(authSession?.access_token) headers.set("Authorization", "Bearer " + authSession.access_token);
+  if(options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+
+  let response;
+  try {
+    response = await fetch(SUPABASE_URL + path, {...options, headers});
+  } catch (e) {
+    throw new Error("Impossible de joindre Supabase. Vérifie la connexion Internet.");
+  }
+
+  if(response.status === 401 && retry && authSession?.refresh_token){
+    const ok = await refreshSession();
+    if(ok) return apiFetch(path, options, false);
+  }
+  return response;
+}
+
+async function signInWithPassword(email, password){
+  let response;
+  try {
+    response = await fetch(SUPABASE_URL + "/auth/v1/token?grant_type=password", {
+      method: "POST",
+      headers: {"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+      body: JSON.stringify({email, password})
+    });
+  } catch(e) {
+    return {error: {message: "Load failed"}};
+  }
+  const body = await response.json().catch(()=>({}));
+  if(!response.ok) return {error: {message: body?.msg || body?.error_description || body?.message || "Connexion impossible"}};
+  storeSession(body);
+  scheduleRefresh();
+  return {data: {session: body}};
+}
+
+async function refreshSession(){
+  if(!authSession?.refresh_token) return false;
+  try{
+    const response = await fetch(SUPABASE_URL + "/auth/v1/token?grant_type=refresh_token", {
+      method: "POST",
+      headers: {"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
+      body: JSON.stringify({refresh_token: authSession.refresh_token})
+    });
+    if(!response.ok) return false;
+    const body = await response.json();
+    storeSession(body);
+    scheduleRefresh();
+    return true;
+  }catch(e){
+    return false;
+  }
+}
+
+function scheduleRefresh(){
+  if(refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(()=>refreshSession(), 45 * 60 * 1000);
+}
+
+async function signOutLocal(){
+  try{
+    if(authSession?.access_token){
+      await apiFetch("/auth/v1/logout", {method:"POST"}, false);
+    }
+  }catch(e){}
+  storeSession(null);
+  if(refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = null;
+}
+
 
 let state = {maxNumber:100, drawn:[], sideBets:[]};
 let remoteRowId = 1;
@@ -159,17 +245,21 @@ function setSync(text, mode="ok"){
 }
 
 async function save(){
-  if(saving) return;
+  if(saving || !authSession?.access_token) return;
   saving=true;
   setSync("Sauvegarde…","busy");
   try{
-    const {data,error}=await db.from("tirage_vip")
-      .update({donnees:state,updated_at:new Date().toISOString()})
-      .eq("id",remoteRowId)
-      .select("updated_at")
-      .single();
-    if(error) throw error;
-    lastRemoteUpdatedAt=data.updated_at;
+    const response = await apiFetch("/rest/v1/tirage_vip?id=eq."+encodeURIComponent(remoteRowId), {
+      method:"PATCH",
+      headers:{"Prefer":"return=representation"},
+      body:JSON.stringify({donnees:state,updated_at:new Date().toISOString()})
+    });
+    if(!response.ok){
+      const txt=await response.text();
+      throw new Error(txt || "Erreur de sauvegarde");
+    }
+    const rows=await response.json();
+    if(rows && rows[0]?.updated_at) lastRemoteUpdatedAt=rows[0].updated_at;
     setSync("Synchronisé");
   }catch(err){
     console.error(err);
@@ -180,13 +270,15 @@ async function save(){
 }
 
 async function loadRemote(force=false){
+  if(!authSession?.access_token) return;
   try{
-    const {data,error}=await db.from("tirage_vip")
-      .select("id,donnees,updated_at")
-      .order("id",{ascending:true})
-      .limit(1)
-      .single();
-    if(error) throw error;
+    const response=await apiFetch("/rest/v1/tirage_vip?select=id,donnees,updated_at&order=id.asc&limit=1");
+    if(!response.ok){
+      const txt=await response.text();
+      throw new Error(txt || "Lecture impossible");
+    }
+    const rows=await response.json();
+    const data=rows?.[0];
     if(!data) return;
     remoteRowId=data.id;
     if(force || data.updated_at!==lastRemoteUpdatedAt){
@@ -246,20 +338,20 @@ async function login(){
   if(!email||!password){errEl.textContent="Entre ton courriel et ton mot de passe.";return}
   document.getElementById("loginBtn").disabled=true;
   document.getElementById("loginBtn").textContent="Connexion…";
-  const {data,error}=await db.auth.signInWithPassword({email,password});
+  const result=await signInWithPassword(email,password);
   document.getElementById("loginBtn").disabled=false;
   document.getElementById("loginBtn").textContent="Se connecter";
-  if(error){
-    errEl.textContent=error.message==="Invalid login credentials"
+  if(result.error){
+    errEl.textContent=result.error.message==="Invalid login credentials"
       ?"Courriel ou mot de passe incorrect."
-      :error.message;
+      :result.error.message;
     return;
   }
-  showApp(data.session);
+  showApp(result.data.session);
 }
 
 async function logout(){
-  await db.auth.signOut();
+  await signOutLocal();
   showLogin();
 }
 
@@ -433,16 +525,21 @@ document.getElementById("logoutBtn").addEventListener("click",logout);
 document.getElementById("drawInput").addEventListener("keydown",e=>{if(e.key==="Enter")drawNumber()});
 
 async function initApp(){
-  const {data:{session}}=await db.auth.getSession();
-  if(session)showApp(session);else showLogin();
-
-  db.auth.onAuthStateChange((event,session)=>{
-    if(event==="SIGNED_OUT")showLogin();
-  });
+  const stored=readStoredSession();
+  if(stored){
+    storeSession(stored);
+    const refreshed = stored.refresh_token ? await refreshSession() : false;
+    if(refreshed || authSession?.access_token){
+      scheduleRefresh();
+      showApp(authSession);
+      return;
+    }
+  }
+  showLogin();
 }
 initApp().catch(err=>{
   console.error(err);
-  document.getElementById("loginError").textContent="Impossible de charger l’application. Vérifie la connexion Internet et réessaie.";
+  document.getElementById("loginError").textContent="Impossible de charger l’application.";
 });
 </script>
 </body>
