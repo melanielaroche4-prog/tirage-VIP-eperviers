@@ -135,12 +135,12 @@ button{font-weight:700;cursor:pointer}
 
 </div>
 
-<script type="module">
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
 
 const SUPABASE_URL = 'https://xloxfhanoygbgnrytyxh.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_gsP4NDTVR1vhiTMW4lZjHA_KGNVOrwk';
-const db = createClient(SUPABASE_URL, SUPABASE_KEY, {
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true }
 });
 
@@ -432,11 +432,17 @@ document.getElementById("loginPassword").addEventListener("keydown",e=>{if(e.key
 document.getElementById("logoutBtn").addEventListener("click",logout);
 document.getElementById("drawInput").addEventListener("keydown",e=>{if(e.key==="Enter")drawNumber()});
 
-const {data:{session}}=await db.auth.getSession();
-if(session)showApp(session);else showLogin();
+async function initApp(){
+  const {data:{session}}=await db.auth.getSession();
+  if(session)showApp(session);else showLogin();
 
-db.auth.onAuthStateChange((event,session)=>{
-  if(event==="SIGNED_OUT")showLogin();
+  db.auth.onAuthStateChange((event,session)=>{
+    if(event==="SIGNED_OUT")showLogin();
+  });
+}
+initApp().catch(err=>{
+  console.error(err);
+  document.getElementById("loginError").textContent="Impossible de charger l’application. Vérifie la connexion Internet et réessaie.";
 });
 </script>
 </body>
