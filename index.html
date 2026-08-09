@@ -46,6 +46,29 @@ button{font-weight:700;cursor:pointer}
 .brand{justify-content:space-between}.brand-left{display:flex;align-items:center;gap:16px}
 @media(max-width:600px){.brand{align-items:center}.logout-btn{font-size:.75rem;padding:6px 8px}.brand-left{gap:10px}}
 
+
+.viewer-badge{
+  display:inline-block;
+  background:#eef2ff;
+  color:#3730a3;
+  border:1px solid #c7d2fe;
+  padding:5px 9px;
+  border-radius:999px;
+  font-size:.78rem;
+  font-weight:800;
+}
+.viewer-notice{
+  max-width:1100px;
+  margin:10px auto;
+  padding:10px 14px;
+  border-radius:12px;
+  background:#eef2ff;
+  border:1px solid #c7d2fe;
+  color:#3730a3;
+  font-weight:700;
+}
+.viewer-only-hidden{display:none !important}
+
 </style>
 </head>
 <body>
@@ -63,6 +86,7 @@ button{font-weight:700;cursor:pointer}
   </div>
 </header>
 <div id="syncBar" class="syncbar hidden"><span id="syncDot" class="syncdot"></span><span id="syncText">Synchronisé</span></div>
+<div id="viewerNotice" class="viewer-notice hidden">👁️ Mode consultation — tu peux suivre le tirage en direct, mais tu ne peux pas le modifier.</div>
 <div id="loginScreen" class="container">
   <div class="auth-card">
     <h2>Connexion — Tirage VIP</h2>
@@ -231,6 +255,7 @@ async function signOutLocal(){
 
 
 let state = {maxNumber:100, drawn:[], sideBets:[]};
+let userRole = "viewer";
 let remoteRowId = 1;
 let lastRemoteUpdatedAt = null;
 let saving = false;
@@ -245,6 +270,7 @@ function setSync(text, mode="ok"){
 }
 
 async function save(){
+  if(!isAdmin()) return;
   if(saving || !authSession?.access_token) return;
   saving=true;
   setSync("Sauvegarde…","busy");
@@ -260,7 +286,7 @@ async function save(){
     }
     const rows=await response.json();
     if(rows && rows[0]?.updated_at) lastRemoteUpdatedAt=rows[0].updated_at;
-    setSync("Synchronisé");
+    setSync(isAdmin() ? "Synchronisé · Administrateur" : "Synchronisé · Consultation");
   }catch(err){
     console.error(err);
     setSync("Erreur de synchronisation","err");
@@ -311,14 +337,70 @@ function normalizeState(){
   });
 }
 
-function showApp(session){
+
+async function loadUserRole(){
+  try{
+    const response = await apiFetch("/rest/v1/tirage_roles?select=role&user_id=eq."+encodeURIComponent(authSession.user.id));
+    if(!response.ok) throw new Error(await response.text());
+    const rows = await response.json();
+    userRole = rows?.[0]?.role || "viewer";
+  }catch(e){
+    console.error("Role load error", e);
+    userRole = "viewer";
+  }
+  applyRoleUI();
+}
+
+function isAdmin(){
+  return userRole === "admin";
+}
+
+function applyRoleUI(){
+  const notice=document.getElementById("viewerNotice");
+  if(notice) notice.classList.toggle("hidden", isAdmin());
+
+  // Generic controls that alter the draw.
+  const ids=["maxNumber","drawInput","sideName","sidePot"];
+  ids.forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.disabled=!isAdmin();
+  });
+
+  // Hide mutation buttons using their onclick names.
+  const mutating = [
+    "applyMax","drawNumber","undoDraw","resetAll",
+    "addSideBet","deleteSideBet","setPot","assign",
+    "removeAssign","splitPot","continueBet","reopen"
+  ];
+
+  document.querySelectorAll("button").forEach(btn=>{
+    const oc=btn.getAttribute("onclick") || "";
+    if(mutating.some(fn=>oc.includes(fn+"("))){
+      btn.style.display = isAdmin() ? "" : "none";
+    }
+  });
+
+  // Disable editable inputs rendered dynamically in side bets.
+  if(!isAdmin()){
+    document.querySelectorAll('#sideBets input').forEach(el=>el.disabled=true);
+  }
+}
+
+async function showApp(session){
   document.getElementById("loginScreen").classList.add("hidden");
   document.getElementById("appScreen").classList.remove("hidden");
   document.getElementById("logoutBtn").classList.remove("hidden");
   document.getElementById("syncBar").classList.remove("hidden");
-  loadRemote(true);
+  await loadUserRole();
+  await loadRemote(true);
+  applyRoleUI();
   if(pollTimer) clearInterval(pollTimer);
-  pollTimer=setInterval(()=>{ if(!saving) loadRemote(false); },2000);
+  pollTimer=setInterval(async ()=>{
+    if(!saving){
+      await loadRemote(false);
+      applyRoleUI();
+    }
+  },2000);
 }
 
 function showLogin(){
@@ -347,7 +429,7 @@ async function login(){
       :result.error.message;
     return;
   }
-  showApp(result.data.session);
+  await showApp(result.data.session);
 }
 
 async function logout(){
@@ -363,6 +445,7 @@ function showPanel(p){
   document.getElementById("btnSide").classList.toggle("primary",!main);
 }
 function applyMax(){
+  if(!isAdmin()) return;
   const n=parseInt(document.getElementById("maxNumber").value,10);
   if(!n||n<1)return;
   state.maxNumber=n;
@@ -371,6 +454,7 @@ function applyMax(){
   render(); save();
 }
 function drawNumber(){
+  if(!isAdmin()) return;
   const inp=document.getElementById("drawInput");
   const n=parseInt(inp.value,10);
   if(!n||n<1||n>state.maxNumber){
@@ -386,18 +470,21 @@ function drawNumber(){
   triggerTwoLeftAlert();
 }
 function undoDraw(){
+  if(!isAdmin()) return;
   if(!state.drawn.length)return;
   state.drawn.pop();
   state.sideBets.forEach(sb=>{if(sb.status==="won"){sb.status="active";sb.winner=null}});
   recomputeResults(); render(); save();
 }
 function resetAll(){
+  if(!isAdmin()) return;
   if(!confirm("Tout réinitialiser?"))return;
   state={maxNumber:100,drawn:[],sideBets:[]};
   document.getElementById("maxNumber").value=100;
   render(); save();
 }
 function addSideBet(){
+  if(!isAdmin()) return;
   const name=document.getElementById("sideName").value.trim();
   const pot=parseFloat(document.getElementById("sidePot").value)||0;
   if(!name)return;
@@ -410,14 +497,17 @@ function addSideBet(){
   renderSideBets(); save();
 }
 function deleteSideBet(id){
+  if(!isAdmin()) return;
   if(!confirm("Supprimer ce Side Bet?"))return;
   state.sideBets=state.sideBets.filter(s=>s.id!==id); renderSideBets(); save();
 }
 function setPot(id,val){
+  if(!isAdmin()) return;
   const sb=state.sideBets.find(s=>s.id===id); if(!sb)return;
   sb.pot=Math.max(0,parseFloat(val)||0); renderSideBets(); save();
 }
 function assign(id,n){
+  if(!isAdmin()) return;
   const sb=state.sideBets.find(s=>s.id===id); if(!sb||sb.status!=="active")return;
   const input=document.getElementById("person_"+id);
   const person=input.value.trim();
@@ -428,6 +518,7 @@ function assign(id,n){
   const newInput=document.getElementById("person_"+id); if(newInput)newInput.value=person;
 }
 function removeAssign(id,n){
+  if(!isAdmin()) return;
   const sb=state.sideBets.find(s=>s.id===id); if(!sb||!sb.assignments[n])return;
   if(!confirm("Libérer le numéro "+n+" de "+sb.assignments[n]+"?"))return;
   delete sb.assignments[n]; sb.lastTwoAlertSignature=null; renderSideBets(); save();
@@ -441,18 +532,21 @@ function recomputeResults(){
   });
 }
 function splitPot(id){
+  if(!isAdmin()) return;
   const sb=state.sideBets.find(s=>s.id===id);if(!sb)return;
   const active=activeEntries(sb);if(active.length!==2)return;
   sb.status="split";sb.split=active.map(([n,p])=>({number:+n,person:p,amount:(sb.pot||0)/2}));
   renderSideBets();save();
 }
 function continueBet(id){
+  if(!isAdmin()) return;
   const sb=state.sideBets.find(s=>s.id===id);if(!sb)return;
   const active=activeEntries(sb);
   sb.lastTwoAlertSignature=active.map(x=>x[0]).sort().join("-");
   renderSideBets();save();
 }
 function reopen(id){
+  if(!isAdmin()) return;
   const sb=state.sideBets.find(s=>s.id===id);if(!sb)return;
   sb.status="active";sb.winner=null;sb.split=null;sb.lastTwoAlertSignature=null;
   recomputeResults();renderSideBets();save();
@@ -469,7 +563,7 @@ function triggerTwoLeftAlert(){
     break;
   }
 }
-function render(){normalizeState();document.getElementById("maxNumber").value=state.maxNumber;renderMain();renderSideBets()}
+function render(){normalizeState();document.getElementById("maxNumber").value=state.maxNumber;renderMain();renderSideBets();applyRoleUI()}
 function renderMain(){
   const root=document.getElementById("mainNumbers");root.innerHTML="";
   for(let n=1;n<=state.maxNumber;n++){
@@ -531,7 +625,7 @@ async function initApp(){
     const refreshed = stored.refresh_token ? await refreshSession() : false;
     if(refreshed || authSession?.access_token){
       scheduleRefresh();
-      showApp(authSession);
+      await showApp(authSession);
       return;
     }
   }
