@@ -81,6 +81,13 @@ button{font-weight:700;cursor:pointer}
 .total-box{font-size:1.15rem;font-weight:900;margin-top:12px;padding:12px;border-radius:12px;background:#f3f4f6}
 @media(max-width:650px){.finalist-grid{grid-template-columns:65px 1fr 90px}.recap-table{font-size:.8rem}}
 
+
+.ticket-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;margin-top:12px}
+.ticket-row{display:grid;grid-template-columns:52px 1fr;gap:8px;align-items:center;padding:8px;border:1px solid #e5e7eb;border-radius:10px;background:#fff}
+.ticket-no{font-weight:900;text-align:center}
+.ticket-row input{width:100%;box-sizing:border-box}
+.import-box{background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:12px;margin-top:12px}
+.search-box{margin-top:12px}
 </style>
 </head>
 <body>
@@ -120,6 +127,7 @@ button{font-weight:700;cursor:pointer}
 
 <div class="tabs">
 <button id="btnMain" class="primary" onclick="showPanel('main')">Tirage principal</button>
+<button id="btnTickets" onclick="showPanel('tickets')">Participants / Billets</button>
 <button id="btnSide" onclick="showPanel('side')">Side Bets</button>
 <button id="btnRecap" onclick="showPanel('recap')">Récapitulatif</button>
 </div>
@@ -150,6 +158,29 @@ button{font-weight:700;cursor:pointer}
   </div>
   <div class="card">
     <div id="mainNumbers" class="numbers"></div>
+  </div>
+</div>
+
+
+<div id="ticketsPanel" class="hidden">
+  <div class="card">
+    <h2 style="border-left:5px solid #e31b23;padding-left:10px">Participants / Billets</h2>
+    <p class="small">Associe à l’avance chaque numéro de billet à son détenteur. Ces noms seront utilisés automatiquement dans le tirage principal, les alertes des 5/2 derniers et le récapitulatif.</p>
+    <div class="search-box row">
+      <div class="field" style="flex:1">
+        <label>Rechercher un numéro ou un nom</label>
+        <input id="ticketSearch" type="text" placeholder="Ex. 125 ou Julie" oninput="renderTickets()">
+      </div>
+      <button class="danger" onclick="clearAllTicketNames()">Effacer tous les noms</button>
+    </div>
+    <div class="import-box">
+      <strong>Importer une liste CSV</strong>
+      <p class="small">Format : <code>numero,nom</code> ou <code>numéro;nom</code>. Exemple : <code>22,Julie Tremblay</code>.</p>
+      <input id="ticketCsvFile" type="file" accept=".csv,text/csv">
+      <button class="primary" style="margin-top:8px" onclick="importTicketCsv()">Importer le CSV</button>
+    </div>
+    <div id="ticketCount" class="small" style="margin-top:10px"></div>
+    <div id="ticketList" class="ticket-list"></div>
   </div>
 </div>
 
@@ -275,7 +306,7 @@ async function signOutLocal(){
 }
 
 
-let state = {maxNumber:300, drawn:[], sideBets:[], main:{payouts:[],splitMode:null,finalistNames:{},finalistPresence:{},fiveDecision:null,twoDecision:null}};
+let state = {maxNumber:300, drawn:[], sideBets:[], tickets:{}, main:{payouts:[],splitMode:null,finalistNames:{},finalistPresence:{},fiveDecision:null,twoDecision:null}};
 let userRole = "viewer";
 
 const MAIN_PRIZES = {
@@ -359,6 +390,7 @@ function normalizeState(){
   if(!Array.isArray(state.drawn)) state.drawn=[];
   if(!Array.isArray(state.sideBets)) state.sideBets=[];
   if(!state.main || typeof state.main!=="object") state.main={};
+  if(!state.tickets || typeof state.tickets!=="object") state.tickets={};
   if(!Array.isArray(state.main.payouts)) state.main.payouts=[];
   if(!state.main.finalistNames) state.main.finalistNames={};
   if(!state.main.finalistPresence) state.main.finalistPresence={};
@@ -408,7 +440,8 @@ function applyRoleUI(){
   const mutating = [
     "applyMax","drawNumber","undoDraw","resetAll",
     "addSideBet","deleteSideBet","setPot","assign",
-    "removeAssign","splitPot","continueBet","reopen"
+    "removeAssign","splitPot","continueBet","reopen",
+    "setTicketName","clearAllTicketNames","importTicketCsv"
   ];
 
   document.querySelectorAll("button").forEach(btn=>{
@@ -420,7 +453,7 @@ function applyRoleUI(){
 
   // Disable editable inputs rendered dynamically in side bets.
   if(!isAdmin()){
-    document.querySelectorAll('#sideBets input, #mainPrizeStatus input').forEach(el=>el.disabled=true);
+    document.querySelectorAll('#sideBets input, #mainPrizeStatus input, #ticketsPanel input').forEach(el=>el.disabled=true);
   }
 }
 
@@ -476,13 +509,16 @@ async function logout(){
 }
 
 function showPanel(p){
-  const main=p==="main", side=p==="side", recap=p==="recap";
+  const main=p==="main", tickets=p==="tickets", side=p==="side", recap=p==="recap";
   document.getElementById("mainPanel").classList.toggle("hidden",!main);
+  document.getElementById("ticketsPanel").classList.toggle("hidden",!tickets);
   document.getElementById("sidePanel").classList.toggle("hidden",!side);
   document.getElementById("recapPanel").classList.toggle("hidden",!recap);
   document.getElementById("btnMain").classList.toggle("primary",main);
+  document.getElementById("btnTickets").classList.toggle("primary",tickets);
   document.getElementById("btnSide").classList.toggle("primary",side);
   document.getElementById("btnRecap").classList.toggle("primary",recap);
+  if(tickets) renderTickets();
   if(recap) renderRecap();
 }
 function applyMax(){
@@ -513,15 +549,18 @@ function drawNumber(){
 
   const prize=MAIN_PRIZES[rank];
   if(prize && !(state.main.splitMode==="five" && rank>=296) && !(state.main.splitMode==="two" && rank>=299)){
-    const known=state.main.finalistNames[n] || "";
-    const entered=window.prompt(
-      "💰 PRIX DU TIRAGE PRINCIPAL\n\n"+
-      rank+"e numéro tiré : "+n+"\n"+
-      "Montant gagné : "+money(prize)+"\n\n"+
-      "Inscris le nom de la personne gagnante :",
-      known
-    );
-    const name=(entered===null ? known : entered.trim());
+    let name=ticketName(n) || state.main.finalistNames[n] || "";
+    if(!name){
+      const entered=window.prompt(
+        "💰 PRIX DU TIRAGE PRINCIPAL\n\n"+
+        rank+"e numéro tiré : "+n+"\n"+
+        "Montant gagné : "+money(prize)+"\n\n"+
+        "Aucun détenteur n'est inscrit pour ce billet.\nInscris le nom de la personne gagnante :",
+        ""
+      );
+      name=(entered||"").trim();
+      if(name) state.tickets[n]=name;
+    }
     if(name) state.main.finalistNames[n]=name;
     upsertMainPayout({
       rank:rank,
@@ -562,7 +601,7 @@ function undoDraw(){
 function resetAll(){
   if(!isAdmin()) return;
   if(!confirm("Tout réinitialiser?"))return;
-  state={maxNumber:300,drawn:[],sideBets:[],main:{payouts:[],splitMode:null,finalistNames:{},finalistPresence:{},fiveDecision:null,twoDecision:null}};
+  state={maxNumber:300,drawn:[],sideBets:[],tickets:{},main:{payouts:[],splitMode:null,finalistNames:{},finalistPresence:{},fiveDecision:null,twoDecision:null}};
   document.getElementById("maxNumber").value=300;
   render(); save();
 }
@@ -607,6 +646,76 @@ function removeAssign(id,n){
   delete sb.assignments[n]; sb.lastTwoAlertSignature=null; renderSideBets(); save();
 }
 
+
+function ticketName(number){
+  return (state.tickets?.[number] || "").trim();
+}
+
+function setTicketName(number, value){
+  if(!isAdmin()) return;
+  const v=(value||"").trim();
+  if(v) state.tickets[number]=v;
+  else delete state.tickets[number];
+  if(v) state.main.finalistNames[number]=v;
+  renderTickets();
+  save();
+}
+
+function renderTickets(){
+  const root=document.getElementById("ticketList");
+  const count=document.getElementById("ticketCount");
+  if(!root) return;
+  const q=(document.getElementById("ticketSearch")?.value || "").trim().toLowerCase();
+  root.innerHTML="";
+  let shown=0,named=0;
+  for(let n=1;n<=state.maxNumber;n++){
+    const name=ticketName(n);
+    if(name) named++;
+    const hay=(String(n)+" "+name).toLowerCase();
+    if(q && !hay.includes(q)) continue;
+    shown++;
+    const row=document.createElement("div");
+    row.className="ticket-row";
+    row.innerHTML=`<div class="ticket-no">${n}</div><input type="text" value="${esc(name)}" placeholder="Nom du détenteur" onchange="setTicketName(${n},this.value)">`;
+    root.appendChild(row);
+  }
+  if(count) count.textContent=`${named} billet(s) avec un nom sur ${state.maxNumber}`+(q?` · ${shown} résultat(s) affiché(s)`:"");
+  applyRoleUI();
+}
+
+function clearAllTicketNames(){
+  if(!isAdmin()) return;
+  if(!confirm("Effacer tous les noms associés aux billets?")) return;
+  state.tickets={};
+  state.main.finalistNames={};
+  render();
+  save();
+}
+
+async function importTicketCsv(){
+  if(!isAdmin()) return;
+  const input=document.getElementById("ticketCsvFile");
+  const file=input?.files?.[0];
+  if(!file){alert("Choisis d'abord un fichier CSV.");return}
+  const text=await file.text();
+  const lines=text.split(/\r?\n/).filter(x=>x.trim());
+  let imported=0,skipped=0;
+  for(const line of lines){
+    const sep=line.includes(";")?";":",";
+    const parts=line.split(sep);
+    if(parts.length<2){skipped++;continue}
+    const n=parseInt(parts[0].replace(/[^\d]/g,""),10);
+    const name=parts.slice(1).join(sep).trim().replace(/^"|"$/g,"");
+    if(!n || n<1 || n>state.maxNumber || !name){skipped++;continue}
+    state.tickets[n]=name;
+    state.main.finalistNames[n]=name;
+    imported++;
+  }
+  render();
+  save();
+  alert(imported+" nom(s) importé(s)."+(skipped?" "+skipped+" ligne(s) ignorée(s).":""));
+}
+
 function remainingMainNumbers(){
   const drawn=new Set(state.drawn);
   const out=[];
@@ -643,7 +752,10 @@ function updateSplitRealRank(rank, number){
 
 function saveFinalistName(number, value){
   if(!isAdmin()) return;
-  state.main.finalistNames[number]=value.trim();
+  const v=value.trim();
+  state.main.finalistNames[number]=v;
+  if(v) state.tickets[number]=v;
+  else delete state.tickets[number];
   save();
 }
 function saveFinalistPresence(number, checked){
@@ -657,14 +769,14 @@ function splitLastFive(){
   const nums=remainingMainNumbers();
   if(nums.length!==5) return;
   const allPresent=nums.every(n=>state.main.finalistPresence[n]);
-  const allNamed=nums.every(n=>(state.main.finalistNames[n]||"").trim());
+  const allNamed=nums.every(n=>(ticketName(n) || state.main.finalistNames[n] || "").trim());
   if(!allNamed){alert("Inscris le nom des 5 personnes avant de confirmer le split.");return}
   if(!allPresent){alert("Les 5 personnes doivent être présentes pour splitter les 5 derniers montants.");return}
   if(!confirm("Confirmer le split des 5 derniers prix?\\n\\n9 250 $ ÷ 5 = 1 850 $ chacun\\n\\nLe tirage continuera quand même jusqu'à la fin pour les Side Bets.")) return;
   state.main.splitMode="five";
   state.main.fiveDecision="split";
   nums.forEach((n,i)=>upsertMainPayout({
-    rank:296+i,number:n,name:state.main.finalistNames[n],amount:FIVE_SPLIT_TOTAL/5,
+    rank:296+i,number:n,name:(ticketName(n) || state.main.finalistNames[n] || ""),amount:FIVE_SPLIT_TOTAL/5,
     type:"Split à 5",realRank:null
   }));
   render(); save();
@@ -681,14 +793,14 @@ function splitLastTwo(){
   const nums=remainingMainNumbers();
   if(nums.length!==2 || state.main.splitMode==="five") return;
   const allPresent=nums.every(n=>state.main.finalistPresence[n]);
-  const allNamed=nums.every(n=>(state.main.finalistNames[n]||"").trim());
+  const allNamed=nums.every(n=>(ticketName(n) || state.main.finalistNames[n] || "").trim());
   if(!allNamed){alert("Inscris le nom des 2 personnes avant de confirmer le split.");return}
   if(!allPresent){alert("Les 2 personnes doivent être présentes pour splitter les deux derniers montants.");return}
   if(!confirm("Confirmer le split des 2 derniers prix?\\n\\n6 000 $ ÷ 2 = 3 000 $ chacun\\n\\nLe tirage continuera quand même jusqu'au dernier numéro pour les Side Bets.")) return;
   state.main.splitMode="two";
   state.main.twoDecision="split";
   nums.forEach((n,i)=>upsertMainPayout({
-    rank:299+i,number:n,name:state.main.finalistNames[n],amount:TWO_SPLIT_TOTAL/2,
+    rank:299+i,number:n,name:(ticketName(n) || state.main.finalistNames[n] || ""),amount:TWO_SPLIT_TOTAL/2,
     type:"Split à 2",realRank:null
   }));
   render(); save();
@@ -712,7 +824,7 @@ function renderMainPrizeDecision(){
       <div>Les 5 derniers prix totalisent <strong>${money(FIVE_SPLIT_TOTAL)}</strong>, soit <strong>${money(FIVE_SPLIT_TOTAL/5)} chacun</strong> si les 5 personnes présentes acceptent.</div>
       <div class="finalist-grid">
         <strong>Numéro</strong><strong>Nom</strong><strong>Présent</strong>
-        ${remaining.map(n=>`<strong>${n}</strong><input type="text" value="${esc(state.main.finalistNames[n]||"")}" onchange="saveFinalistName(${n},this.value)" placeholder="Nom"><label><input type="checkbox" ${state.main.finalistPresence[n]?"checked":""} onchange="saveFinalistPresence(${n},this.checked)"> Oui</label>`).join("")}
+        ${remaining.map(n=>`<strong>${n}</strong><input type="text" value="${esc(ticketName(n) || state.main.finalistNames[n] || "")}" onchange="saveFinalistName(${n},this.value)" placeholder="Nom"><label><input type="checkbox" ${state.main.finalistPresence[n]?"checked":""} onchange="saveFinalistPresence(${n},this.checked)"> Oui</label>`).join("")}
       </div>
       <div class="row" style="margin-top:12px"><button class="green" onclick="splitLastFive()">Splitter à 5</button><button class="primary" onclick="continueAfterFive()">Continuer sans split</button></div>
       <div class="small" style="margin-top:8px">Même en cas de split, le tirage continue jusqu'à la fin pour déterminer l'ordre réel et terminer les Side Bets.</div>
@@ -723,7 +835,7 @@ function renderMainPrizeDecision(){
       <div>Les deux derniers prix totalisent <strong>${money(TWO_SPLIT_TOTAL)}</strong>, soit <strong>${money(TWO_SPLIT_TOTAL/2)} chacun</strong> si les 2 personnes présentes acceptent.</div>
       <div class="finalist-grid">
         <strong>Numéro</strong><strong>Nom</strong><strong>Présent</strong>
-        ${remaining.map(n=>`<strong>${n}</strong><input type="text" value="${esc(state.main.finalistNames[n]||"")}" onchange="saveFinalistName(${n},this.value)" placeholder="Nom"><label><input type="checkbox" ${state.main.finalistPresence[n]?"checked":""} onchange="saveFinalistPresence(${n},this.checked)"> Oui</label>`).join("")}
+        ${remaining.map(n=>`<strong>${n}</strong><input type="text" value="${esc(ticketName(n) || state.main.finalistNames[n] || "")}" onchange="saveFinalistName(${n},this.value)" placeholder="Nom"><label><input type="checkbox" ${state.main.finalistPresence[n]?"checked":""} onchange="saveFinalistPresence(${n},this.checked)"> Oui</label>`).join("")}
       </div>
       <div class="row" style="margin-top:12px"><button class="green" onclick="splitLastTwo()">Splitter à 2</button><button class="primary" onclick="continueAfterTwo()">Continuer sans split</button></div>
       <div class="small" style="margin-top:8px">Le tirage continue ensuite jusqu'au dernier numéro pour les Side Bets.</div>
@@ -820,7 +932,7 @@ function triggerTwoLeftAlert(){
     break;
   }
 }
-function render(){normalizeState();document.getElementById("maxNumber").value=state.maxNumber;renderMain();renderMainPrizeDecision();renderSideBets();renderRecap();applyRoleUI()}
+function render(){normalizeState();document.getElementById("maxNumber").value=state.maxNumber;renderMain();renderTickets();renderMainPrizeDecision();renderSideBets();renderRecap();applyRoleUI()}
 function renderMain(){
   const root=document.getElementById("mainNumbers");root.innerHTML="";
   for(let n=1;n<=state.maxNumber;n++){
@@ -871,7 +983,7 @@ function renderSideBets(){
 function money(v){return new Intl.NumberFormat("fr-CA",{style:"currency",currency:"CAD"}).format(v||0)}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 
-Object.assign(window,{showPanel,applyMax,drawNumber,undoDraw,resetAll,addSideBet,deleteSideBet,setPot,assign,removeAssign,splitPot,continueBet,reopen,saveFinalistName,saveFinalistPresence,splitLastFive,continueAfterFive,splitLastTwo,continueAfterTwo});
+Object.assign(window,{showPanel,applyMax,drawNumber,undoDraw,resetAll,addSideBet,deleteSideBet,setPot,assign,removeAssign,splitPot,continueBet,reopen,saveFinalistName,saveFinalistPresence,splitLastFive,continueAfterFive,splitLastTwo,continueAfterTwo,setTicketName,clearAllTicketNames,importTicketCsv,renderTickets});
 
 document.getElementById("loginBtn").addEventListener("click",login);
 document.getElementById("loginPassword").addEventListener("keydown",e=>{if(e.key==="Enter")login()});
