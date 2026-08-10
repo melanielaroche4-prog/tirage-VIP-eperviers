@@ -69,6 +69,18 @@ button{font-weight:700;cursor:pointer}
 }
 .viewer-only-hidden{display:none !important}
 
+
+.prize-alert{margin-top:14px;padding:16px;border:2px solid #e31b23;border-radius:14px;background:#fff7f7}
+.prize-alert h3{margin:0 0 8px;color:#b91c1c}
+.finalist-grid{display:grid;grid-template-columns:90px 1fr 120px;gap:8px;align-items:center;margin-top:10px}
+.finalist-grid input[type="text"]{width:100%;box-sizing:border-box}
+.recap-table{width:100%;border-collapse:collapse;margin-top:10px}
+.recap-table th,.recap-table td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}
+.recap-table th{font-size:.8rem;color:#6b7280}
+.prize-chip{display:inline-block;padding:3px 7px;border-radius:999px;background:#fff1f2;color:#be123c;font-size:.75rem;font-weight:800}
+.total-box{font-size:1.15rem;font-weight:900;margin-top:12px;padding:12px;border-radius:12px;background:#f3f4f6}
+@media(max-width:650px){.finalist-grid{grid-template-columns:65px 1fr 90px}.recap-table{font-size:.8rem}}
+
 </style>
 </head>
 <body>
@@ -109,6 +121,7 @@ button{font-weight:700;cursor:pointer}
 <div class="tabs">
 <button id="btnMain" class="primary" onclick="showPanel('main')">Tirage principal</button>
 <button id="btnSide" onclick="showPanel('side')">Side Bets</button>
+<button id="btnRecap" onclick="showPanel('recap')">Récapitulatif</button>
 </div>
 
 <div id="mainPanel">
@@ -117,7 +130,7 @@ button{font-weight:700;cursor:pointer}
     <div class="row">
       <div class="field">
         <label>Numéros de 1 à</label>
-        <input id="maxNumber" type="number" min="1" value="100">
+        <input id="maxNumber" type="number" min="1" value="300">
       </div>
       <button onclick="applyMax()">Appliquer</button>
     </div>
@@ -129,6 +142,7 @@ button{font-weight:700;cursor:pointer}
       <button class="primary" onclick="drawNumber()">Éliminer partout</button>
     </div>
     <div id="mainStatus" class="status"></div>
+    <div id="mainPrizeStatus"></div>
     <div class="row" style="margin-top:10px">
       <button onclick="undoDraw()">Annuler le dernier tirage</button>
       <button class="danger" onclick="resetAll()">Réinitialiser tout</button>
@@ -155,6 +169,13 @@ button{font-weight:700;cursor:pointer}
     </div>
   </div>
   <div id="sideBets"></div>
+</div>
+
+<div id="recapPanel" class="hidden">
+  <div class="card">
+    <h2 style="border-left:5px solid #e31b23;padding-left:10px">Récapitulatif des gains</h2>
+    <div id="recapContent"></div>
+  </div>
 </div>
 
 </div>
@@ -254,8 +275,18 @@ async function signOutLocal(){
 }
 
 
-let state = {maxNumber:100, drawn:[], sideBets:[]};
+let state = {maxNumber:300, drawn:[], sideBets:[], main:{payouts:[],splitMode:null,finalistNames:{},finalistPresence:{},fiveDecision:null,twoDecision:null}};
 let userRole = "viewer";
+
+const MAIN_PRIZES = {
+  1:1000,15:500,35:500,50:750,62:250,75:500,87:250,100:1000,
+  112:250,125:500,137:500,150:750,162:250,175:1000,187:250,200:750,
+  212:500,225:250,250:500,272:1000,291:250,295:250,296:500,297:1000,
+  298:1750,299:2500,300:3500
+};
+const FIVE_SPLIT_TOTAL = 9250;
+const TWO_SPLIT_TOTAL = 6000;
+
 let remoteRowId = 1;
 let lastRemoteUpdatedAt = null;
 let saving = false;
@@ -327,6 +358,13 @@ function normalizeState(){
   if(!Number.isFinite(+state.maxNumber)) state.maxNumber=100;
   if(!Array.isArray(state.drawn)) state.drawn=[];
   if(!Array.isArray(state.sideBets)) state.sideBets=[];
+  if(!state.main || typeof state.main!=="object") state.main={};
+  if(!Array.isArray(state.main.payouts)) state.main.payouts=[];
+  if(!state.main.finalistNames) state.main.finalistNames={};
+  if(!state.main.finalistPresence) state.main.finalistPresence={};
+  if(state.main.splitMode===undefined) state.main.splitMode=null;
+  if(state.main.fiveDecision===undefined) state.main.fiveDecision=null;
+  if(state.main.twoDecision===undefined) state.main.twoDecision=null;
   state.sideBets.forEach(sb=>{
     if(!sb.assignments) sb.assignments={};
     if(sb.pot===undefined) sb.pot=0;
@@ -382,7 +420,7 @@ function applyRoleUI(){
 
   // Disable editable inputs rendered dynamically in side bets.
   if(!isAdmin()){
-    document.querySelectorAll('#sideBets input').forEach(el=>el.disabled=true);
+    document.querySelectorAll('#sideBets input, #mainPrizeStatus input').forEach(el=>el.disabled=true);
   }
 }
 
@@ -438,11 +476,14 @@ async function logout(){
 }
 
 function showPanel(p){
-  const main=p==="main";
+  const main=p==="main", side=p==="side", recap=p==="recap";
   document.getElementById("mainPanel").classList.toggle("hidden",!main);
-  document.getElementById("sidePanel").classList.toggle("hidden",main);
+  document.getElementById("sidePanel").classList.toggle("hidden",!side);
+  document.getElementById("recapPanel").classList.toggle("hidden",!recap);
   document.getElementById("btnMain").classList.toggle("primary",main);
-  document.getElementById("btnSide").classList.toggle("primary",!main);
+  document.getElementById("btnSide").classList.toggle("primary",side);
+  document.getElementById("btnRecap").classList.toggle("primary",recap);
+  if(recap) renderRecap();
 }
 function applyMax(){
   if(!isAdmin()) return;
@@ -464,23 +505,36 @@ function drawNumber(){
     document.getElementById("mainStatus").textContent="Ce numéro a déjà été pigé"; return;
   }
   state.drawn.push(n); inp.value="";
+  const rank=state.drawn.length;
+  updateSplitRealRank(rank,n);
+  recordNormalPrize(rank,n);
   recomputeResults();
   render(); save();
-  document.getElementById("mainStatus").textContent="Numéro "+n+" éliminé partout";
+  const prize=MAIN_PRIZES[rank];
+  document.getElementById("mainStatus").textContent="Numéro "+n+" éliminé partout — "+rank+"e numéro tiré"+(prize?" · prix "+money(prize):"");
   triggerTwoLeftAlert();
+  triggerMainDecisionAlert();
 }
 function undoDraw(){
   if(!isAdmin()) return;
   if(!state.drawn.length)return;
+  const rank=state.drawn.length;
+  const n=state.drawn[state.drawn.length-1];
   state.drawn.pop();
+  // Remove a normal prize attached to the undone rank. Split payments remain.
+  state.main.payouts=state.main.payouts.filter(p=>!(p.type==="Prix normal" && p.rank===rank));
+  const splitRec=state.main.payouts.find(p=>p.number===n && p.type.startsWith("Split"));
+  if(splitRec) splitRec.realRank=null;
+  if(state.drawn.length<295 && !state.main.splitMode) state.main.fiveDecision=null;
+  if(state.drawn.length<298 && state.main.splitMode!=="five") state.main.twoDecision=null;
   state.sideBets.forEach(sb=>{if(sb.status==="won"){sb.status="active";sb.winner=null}});
   recomputeResults(); render(); save();
 }
 function resetAll(){
   if(!isAdmin()) return;
   if(!confirm("Tout réinitialiser?"))return;
-  state={maxNumber:100,drawn:[],sideBets:[]};
-  document.getElementById("maxNumber").value=100;
+  state={maxNumber:300,drawn:[],sideBets:[],main:{payouts:[],splitMode:null,finalistNames:{},finalistPresence:{},fiveDecision:null,twoDecision:null}};
+  document.getElementById("maxNumber").value=300;
   render(); save();
 }
 function addSideBet(){
@@ -523,6 +577,180 @@ function removeAssign(id,n){
   if(!confirm("Libérer le numéro "+n+" de "+sb.assignments[n]+"?"))return;
   delete sb.assignments[n]; sb.lastTwoAlertSignature=null; renderSideBets(); save();
 }
+
+function remainingMainNumbers(){
+  const drawn=new Set(state.drawn);
+  const out=[];
+  for(let n=1;n<=state.maxNumber;n++) if(!drawn.has(n)) out.push(n);
+  return out;
+}
+
+function getMainPayoutForRank(rank){
+  return state.main.payouts.find(p=>p.rank===rank) || null;
+}
+
+function upsertMainPayout(rec){
+  const idx=state.main.payouts.findIndex(p=>p.rank===rec.rank);
+  if(idx>=0) state.main.payouts[idx]={...state.main.payouts[idx],...rec};
+  else state.main.payouts.push(rec);
+}
+
+function recordNormalPrize(rank, number){
+  const amount=MAIN_PRIZES[rank];
+  if(!amount) return;
+  if(state.main.splitMode==="five" && rank>=296) return;
+  if(state.main.splitMode==="two" && rank>=299) return;
+  const known=state.main.finalistNames[number] || "";
+  const name=prompt("💰 Prix du tirage principal\\n\\n"+rank+"e numéro tiré : "+number+"\\nMontant : "+money(amount)+"\\n\\nNom de la personne gagnante :", known) || known;
+  if(name) state.main.finalistNames[number]=name;
+  upsertMainPayout({rank,number,name:name||"",amount,type:"Prix normal",realRank:rank});
+}
+
+function updateSplitRealRank(rank, number){
+  if(!state.main.splitMode) return;
+  const rec=state.main.payouts.find(p=>p.number===number && p.type.startsWith("Split"));
+  if(rec) rec.realRank=rank;
+}
+
+function saveFinalistName(number, value){
+  if(!isAdmin()) return;
+  state.main.finalistNames[number]=value.trim();
+  save();
+}
+function saveFinalistPresence(number, checked){
+  if(!isAdmin()) return;
+  state.main.finalistPresence[number]=!!checked;
+  save();
+}
+
+function splitLastFive(){
+  if(!isAdmin()) return;
+  const nums=remainingMainNumbers();
+  if(nums.length!==5) return;
+  const allPresent=nums.every(n=>state.main.finalistPresence[n]);
+  const allNamed=nums.every(n=>(state.main.finalistNames[n]||"").trim());
+  if(!allNamed){alert("Inscris le nom des 5 personnes avant de confirmer le split.");return}
+  if(!allPresent){alert("Les 5 personnes doivent être présentes pour splitter les 5 derniers montants.");return}
+  if(!confirm("Confirmer le split des 5 derniers prix?\\n\\n9 250 $ ÷ 5 = 1 850 $ chacun\\n\\nLe tirage continuera quand même jusqu'à la fin pour les Side Bets.")) return;
+  state.main.splitMode="five";
+  state.main.fiveDecision="split";
+  nums.forEach((n,i)=>upsertMainPayout({
+    rank:296+i,number:n,name:state.main.finalistNames[n],amount:FIVE_SPLIT_TOTAL/5,
+    type:"Split à 5",realRank:null
+  }));
+  render(); save();
+}
+
+function continueAfterFive(){
+  if(!isAdmin()) return;
+  state.main.fiveDecision="continue";
+  render(); save();
+}
+
+function splitLastTwo(){
+  if(!isAdmin()) return;
+  const nums=remainingMainNumbers();
+  if(nums.length!==2 || state.main.splitMode==="five") return;
+  const allPresent=nums.every(n=>state.main.finalistPresence[n]);
+  const allNamed=nums.every(n=>(state.main.finalistNames[n]||"").trim());
+  if(!allNamed){alert("Inscris le nom des 2 personnes avant de confirmer le split.");return}
+  if(!allPresent){alert("Les 2 personnes doivent être présentes pour splitter les deux derniers montants.");return}
+  if(!confirm("Confirmer le split des 2 derniers prix?\\n\\n6 000 $ ÷ 2 = 3 000 $ chacun\\n\\nLe tirage continuera quand même jusqu'au dernier numéro pour les Side Bets.")) return;
+  state.main.splitMode="two";
+  state.main.twoDecision="split";
+  nums.forEach((n,i)=>upsertMainPayout({
+    rank:299+i,number:n,name:state.main.finalistNames[n],amount:TWO_SPLIT_TOTAL/2,
+    type:"Split à 2",realRank:null
+  }));
+  render(); save();
+}
+
+function continueAfterTwo(){
+  if(!isAdmin()) return;
+  state.main.twoDecision="continue";
+  render(); save();
+}
+
+function renderMainPrizeDecision(){
+  const root=document.getElementById("mainPrizeStatus");
+  if(!root) return;
+  root.innerHTML="";
+  const remaining=remainingMainNumbers();
+
+  if(remaining.length===5 && !state.main.splitMode && state.main.fiveDecision!=="continue"){
+    root.innerHTML=`<div class="prize-alert">
+      <h3>🚨 5 derniers numéros — décision de split</h3>
+      <div>Les 5 derniers prix totalisent <strong>${money(FIVE_SPLIT_TOTAL)}</strong>, soit <strong>${money(FIVE_SPLIT_TOTAL/5)} chacun</strong> si les 5 personnes présentes acceptent.</div>
+      <div class="finalist-grid">
+        <strong>Numéro</strong><strong>Nom</strong><strong>Présent</strong>
+        ${remaining.map(n=>`<strong>${n}</strong><input type="text" value="${esc(state.main.finalistNames[n]||"")}" onchange="saveFinalistName(${n},this.value)" placeholder="Nom"><label><input type="checkbox" ${state.main.finalistPresence[n]?"checked":""} onchange="saveFinalistPresence(${n},this.checked)"> Oui</label>`).join("")}
+      </div>
+      <div class="row" style="margin-top:12px"><button class="green" onclick="splitLastFive()">Splitter à 5</button><button class="primary" onclick="continueAfterFive()">Continuer sans split</button></div>
+      <div class="small" style="margin-top:8px">Même en cas de split, le tirage continue jusqu'à la fin pour déterminer l'ordre réel et terminer les Side Bets.</div>
+    </div>`;
+  } else if(remaining.length===2 && !state.main.splitMode && state.main.twoDecision!=="continue"){
+    root.innerHTML=`<div class="prize-alert">
+      <h3>🚨 2 derniers numéros — décision de split</h3>
+      <div>Les deux derniers prix totalisent <strong>${money(TWO_SPLIT_TOTAL)}</strong>, soit <strong>${money(TWO_SPLIT_TOTAL/2)} chacun</strong> si les 2 personnes présentes acceptent.</div>
+      <div class="finalist-grid">
+        <strong>Numéro</strong><strong>Nom</strong><strong>Présent</strong>
+        ${remaining.map(n=>`<strong>${n}</strong><input type="text" value="${esc(state.main.finalistNames[n]||"")}" onchange="saveFinalistName(${n},this.value)" placeholder="Nom"><label><input type="checkbox" ${state.main.finalistPresence[n]?"checked":""} onchange="saveFinalistPresence(${n},this.checked)"> Oui</label>`).join("")}
+      </div>
+      <div class="row" style="margin-top:12px"><button class="green" onclick="splitLastTwo()">Splitter à 2</button><button class="primary" onclick="continueAfterTwo()">Continuer sans split</button></div>
+      <div class="small" style="margin-top:8px">Le tirage continue ensuite jusqu'au dernier numéro pour les Side Bets.</div>
+    </div>`;
+  } else if(state.main.splitMode==="five" && remaining.length<=5 && remaining.length>0){
+    root.innerHTML=`<div class="winner"><strong>🤝 Split à 5 confirmé : ${money(FIVE_SPLIT_TOTAL/5)} chacun.</strong><br>Le tirage continue pour compléter l'ordre réel et les Side Bets.</div>`;
+  } else if(state.main.splitMode==="two" && remaining.length<=2 && remaining.length>0){
+    root.innerHTML=`<div class="winner"><strong>🤝 Split à 2 confirmé : ${money(TWO_SPLIT_TOTAL/2)} chacun.</strong><br>Le tirage continue pour compléter l'ordre réel et les Side Bets.</div>`;
+  }
+  applyRoleUI();
+}
+
+function triggerMainDecisionAlert(){
+  const remaining=remainingMainNumbers();
+  if(remaining.length===5 && !state.main.splitMode && state.main.fiveDecision!=="continue"){
+    try{if(navigator.vibrate)navigator.vibrate([300,120,300,120,300])}catch(e){}
+    setTimeout(()=>alert("🚨 TIRAGE PRINCIPAL\\n\\nIl reste 5 numéros.\\nLes 5 personnes présentes peuvent décider de splitter les 5 derniers prix : 1 850 $ chacune.\\n\\nLe tirage continuera quand même pour les Side Bets."),50);
+  } else if(remaining.length===2 && !state.main.splitMode && state.main.twoDecision!=="continue"){
+    try{if(navigator.vibrate)navigator.vibrate([300,120,300])}catch(e){}
+    setTimeout(()=>alert("🚨 TIRAGE PRINCIPAL\\n\\nIl reste 2 numéros.\\nLes 2 personnes présentes peuvent décider de splitter les deux derniers prix : 3 000 $ chacune.\\n\\nLe tirage continuera quand même pour les Side Bets."),50);
+  }
+}
+
+function renderRecap(){
+  const root=document.getElementById("recapContent");
+  if(!root) return;
+  const mainRows=[...state.main.payouts].sort((a,b)=>(a.rank||0)-(b.rank||0));
+  let html=`<h3>Tirage principal</h3>`;
+  if(!mainRows.length) html+=`<div class="small">Aucun montant versé pour l'instant.</div>`;
+  else{
+    html+=`<table class="recap-table"><thead><tr><th>Rang</th><th>Numéro</th><th>Nom</th><th>Type</th><th>Montant</th></tr></thead><tbody>`;
+    for(const p of mainRows){
+      const rankTxt=p.realRank ? p.realRank+"e" : (p.rank?p.rank+"e":"—");
+      html+=`<tr><td>${rankTxt}</td><td>${p.number??"—"}</td><td>${esc(p.name||"À compléter")}</td><td><span class="prize-chip">${esc(p.type||"Prix")}</span></td><td><strong>${money(p.amount)}</strong></td></tr>`;
+    }
+    html+=`</tbody></table>`;
+  }
+  const mainTotal=mainRows.reduce((a,p)=>a+(+p.amount||0),0);
+
+  html+=`<h3 style="margin-top:22px">Side Bets</h3>`;
+  const sideRows=[];
+  state.sideBets.forEach(sb=>{
+    if(sb.status==="won" && sb.winner) sideRows.push({bet:sb.name,name:sb.winner.person,number:sb.winner.number,amount:sb.pot,type:"Gagnant"});
+    if(sb.status==="split" && Array.isArray(sb.split)) sb.split.forEach(x=>sideRows.push({bet:sb.name,name:x.person,number:x.number,amount:x.amount,type:"Split"}));
+  });
+  if(!sideRows.length) html+=`<div class="small">Aucun Side Bet terminé pour l'instant.</div>`;
+  else{
+    html+=`<table class="recap-table"><thead><tr><th>Side Bet</th><th>Numéro</th><th>Nom</th><th>Type</th><th>Montant</th></tr></thead><tbody>`;
+    sideRows.forEach(p=>html+=`<tr><td>${esc(p.bet)}</td><td>${p.number}</td><td>${esc(p.name)}</td><td>${esc(p.type)}</td><td><strong>${money(p.amount)}</strong></td></tr>`);
+    html+=`</tbody></table>`;
+  }
+  const sideTotal=sideRows.reduce((a,p)=>a+(+p.amount||0),0);
+  html+=`<div class="total-box">Total tirage principal : ${money(mainTotal)}<br>Total Side Bets : ${money(sideTotal)}<br>Total général : ${money(mainTotal+sideTotal)}</div>`;
+  root.innerHTML=html;
+}
+
 function activeEntries(sb){return Object.entries(sb.assignments).filter(([n,p])=>!state.drawn.includes(+n))}
 function recomputeResults(){
   state.sideBets.forEach(sb=>{
@@ -563,11 +791,14 @@ function triggerTwoLeftAlert(){
     break;
   }
 }
-function render(){normalizeState();document.getElementById("maxNumber").value=state.maxNumber;renderMain();renderSideBets();applyRoleUI()}
+function render(){normalizeState();document.getElementById("maxNumber").value=state.maxNumber;renderMain();renderMainPrizeDecision();renderSideBets();renderRecap();applyRoleUI()}
 function renderMain(){
   const root=document.getElementById("mainNumbers");root.innerHTML="";
   for(let n=1;n<=state.maxNumber;n++){
-    const d=document.createElement("div");d.className="num"+(state.drawn.includes(n)?" drawn":"");d.textContent=n;root.appendChild(d);
+    const d=document.createElement("div");
+    d.className="num"+(state.drawn.includes(n)?" drawn":"");
+    d.textContent=n;
+    root.appendChild(d);
   }
 }
 function renderSideBets(){
@@ -611,7 +842,7 @@ function renderSideBets(){
 function money(v){return new Intl.NumberFormat("fr-CA",{style:"currency",currency:"CAD"}).format(v||0)}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 
-Object.assign(window,{showPanel,applyMax,drawNumber,undoDraw,resetAll,addSideBet,deleteSideBet,setPot,assign,removeAssign,splitPot,continueBet,reopen});
+Object.assign(window,{showPanel,applyMax,drawNumber,undoDraw,resetAll,addSideBet,deleteSideBet,setPot,assign,removeAssign,splitPot,continueBet,reopen,saveFinalistName,saveFinalistPresence,splitLastFive,continueAfterFive,splitLastTwo,continueAfterTwo});
 
 document.getElementById("loginBtn").addEventListener("click",login);
 document.getElementById("loginPassword").addEventListener("keydown",e=>{if(e.key==="Enter")login()});
