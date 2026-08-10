@@ -504,14 +504,43 @@ function drawNumber(){
   if(state.drawn.includes(n)){
     document.getElementById("mainStatus").textContent="Ce numéro a déjà été pigé"; return;
   }
-  state.drawn.push(n); inp.value="";
-  const rank=state.drawn.length;
+
+  const rank=state.drawn.length+1;
+  state.drawn.push(n);
+  inp.value="";
+
   updateSplitRealRank(rank,n);
-  recordNormalPrize(rank,n);
-  recomputeResults();
-  render(); save();
+
   const prize=MAIN_PRIZES[rank];
-  document.getElementById("mainStatus").textContent="Numéro "+n+" éliminé partout — "+rank+"e numéro tiré"+(prize?" · prix "+money(prize):"");
+  if(prize && !(state.main.splitMode==="five" && rank>=296) && !(state.main.splitMode==="two" && rank>=299)){
+    const known=state.main.finalistNames[n] || "";
+    const entered=window.prompt(
+      "💰 PRIX DU TIRAGE PRINCIPAL\n\n"+
+      rank+"e numéro tiré : "+n+"\n"+
+      "Montant gagné : "+money(prize)+"\n\n"+
+      "Inscris le nom de la personne gagnante :",
+      known
+    );
+    const name=(entered===null ? known : entered.trim());
+    if(name) state.main.finalistNames[n]=name;
+    upsertMainPayout({
+      rank:rank,
+      number:n,
+      name:name||"",
+      amount:prize,
+      type:"Prix normal",
+      realRank:rank
+    });
+  }
+
+  recomputeResults();
+  render();
+  save();
+
+  document.getElementById("mainStatus").textContent=
+    "Numéro "+n+" éliminé partout — "+rank+"e numéro tiré"+
+    (prize ? " · prix "+money(prize) : "");
+
   triggerTwoLeftAlert();
   triggerMainDecisionAlert();
 }
